@@ -12,6 +12,8 @@ import {
   ORIGINAL_PAYLOAD,
   ROTATED_PAYLOAD,
   GENERIC_PAYLOAD,
+  ETHERHIDING_PAYLOAD,
+  FUTURE_VARIANT_PAYLOAD,
   infectedConfig,
   goodFont,
   evilFont,
@@ -70,6 +72,43 @@ test("generic obfuscation → manual-review only, suspicious (not infected)", as
   assert.equal(finding.contentConfirmed, false);
   assert.equal(f.severity, "suspicious");
   assert.equal(f.hasContentConfirmed, false);
+  assert.equal(byId(f, "js.payload.etherhiding-heuristic"), undefined, "no RPC/spawn signal in this fixture");
+});
+
+test("EtherHiding variant payload (dot-notation, inline escapes) → confirmed strip finding, infected", async () => {
+  const repo = await makeRepo({ "next.config.mjs": infectedConfig(ETHERHIDING_PAYLOAD) });
+  const f = await scanRepo(repo);
+  assert.equal(f.severity, "infected");
+  const finding = byId(f, "js.payload.etherhiding");
+  assert.ok(finding, "expected etherhiding-variant finding");
+  assert.equal(finding.action, "strip-js-payload");
+  assert.equal(finding.contentConfirmed, true);
+  assert.ok(finding.edit.offset > 0);
+  assert.equal(byId(f, "js.payload.heuristic"), undefined);
+  assert.equal(byId(f, "js.payload.etherhiding-heuristic"), undefined);
+});
+
+test("future unknown variant (dot-notation + heavy escapes + escaped RPC/spawn technique, no matching signature) → generalized layer catches it, suspicious not infected", async () => {
+  const repo = await makeRepo({ "babel.config.js": infectedConfig(FUTURE_VARIANT_PAYLOAD) });
+  const f = await scanRepo(repo);
+  assert.equal(byId(f, "js.payload.original"), undefined);
+  assert.equal(byId(f, "js.payload.rotated"), undefined);
+  assert.equal(byId(f, "js.payload.etherhiding"), undefined);
+
+  const heuristic = byId(f, "js.payload.heuristic");
+  assert.ok(heuristic, "expected broadened generic heuristic to fire");
+  assert.equal(heuristic.action, "manual-review");
+  assert.equal(heuristic.contentConfirmed, false);
+
+  const fingerprint = byId(f, "js.payload.etherhiding-heuristic");
+  assert.ok(fingerprint, "expected EtherHiding technique fingerprint to fire even though the RPC method name is unicode-escaped");
+  assert.equal(fingerprint.action, "manual-review");
+  assert.equal(fingerprint.confidence, "high");
+  assert.equal(fingerprint.contentConfirmed, false);
+
+  assert.equal(f.severity, "suspicious");
+  assert.equal(f.hasContentConfirmed, false);
+  assert.ok(!f.findings.some((x) => x.action === "strip-js-payload"), "must never auto-strip an unconfirmed match");
 });
 
 test("malicious .vscode (curl|bash C2 task) → whole-dir remove finding", async () => {

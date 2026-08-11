@@ -132,8 +132,13 @@ async function detectJsPayloads(repoDir, findings, rel, isExcluded) {
     let m;
     while ((m = re.exec(text))) lastExport = m.index;
     const tail = lastExport >= 0 ? text.slice(lastExport) : text;
+    const decodedTail = sig.decodeUnicodeEscapes(tail);
+
     const h = sig.GENERIC_HEURISTIC;
-    if (h.globalAssignRe.test(tail) && h.obfArrayRe.test(tail) && h.evalRe.test(tail)) {
+    const hasGlobalFlag = h.globalAssignRes.some((globalRe) => globalRe.test(decodedTail));
+    const hasObfEncoding = h.obfArrayRe.test(tail) || sig.hasHeavyUnicodeEscapeDensity(tail);
+    const hasExecPrimitive = h.evalRe.test(decodedTail) || sig.isDetachedSpawn(decodedTail);
+    if (hasGlobalFlag && hasObfEncoding && hasExecPrimitive) {
       findings.push({
         id: "js.payload.heuristic",
         category: "js",
@@ -142,7 +147,26 @@ async function detectJsPayloads(repoDir, findings, rel, isExcluded) {
         action: "manual-review",
         contentConfirmed: false,
         description:
-          "Obfuscated code appended after the last export (global[...] assignment + obfuscated array + eval). Possible unknown PolinRider variant — review manually.",
+          "Obfuscated code appended after the last export (global flag assignment + obfuscated/encoded payload + code-execution primitive). Possible unknown PolinRider variant — review manually.",
+      });
+    }
+
+    // 3. Technique fingerprint: EtherHiding-style blockchain C2 resolution +
+    //    detached persistence — independent of any syntactic obfuscation
+    //    shape (dot vs bracket notation, decoder array vs inline escapes), so
+    //    it survives future variable/quote-style rotations. Checked against
+    //    DECODED text so escaping the RPC method name or "spawn" itself
+    //    doesn't evade it.
+    if (sig.hasEthRpcMethodLiteral(decodedTail) && sig.isDetachedSpawn(decodedTail)) {
+      findings.push({
+        id: "js.payload.etherhiding-heuristic",
+        category: "js",
+        file: rel(file),
+        confidence: "high",
+        action: "manual-review",
+        contentConfirmed: false,
+        description:
+          "Code appended after the last export queries Ethereum JSON-RPC methods (eth_getBlockByNumber/eth_getTransactionCount/eth_blockNumber) AND spawns a detached, unref'd child process — the EtherHiding C2-resolution + persistence pattern. Review manually; not auto-removed.",
       });
     }
   }
