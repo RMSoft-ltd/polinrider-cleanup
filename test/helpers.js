@@ -60,6 +60,50 @@ export const ROTATED_PAYLOAD =
 export const GENERIC_PAYLOAD =
   `global['zz']=42;var _$_abcd=[12,34,56,78,90];eval(atob('MSt1'));\n`;
 
+// Confirmed 3rd variant ("EtherHiding"): dot-notation flag, no decoder array
+// (inlined \uXXXX escapes instead), Ethereum RPC method literals, detached
+// spawn+unref persistence. Structurally mirrors the real captured sample;
+// the eval/spawn payload argument is the same harmless "1+1" placeholder
+// used by ORIGINAL_PAYLOAD/ROTATED_PAYLOAD — never real shellcode.
+export const ETHERHIDING_PAYLOAD =
+  `global.i="A11--#";global.r=require;typeof module==="object"&&(global.m=module);` +
+  `const http=require("\\u0068\\u0074\\u0074\\u0070");` +
+  `function rc(n){return n;}rc("eth_getBlockByNumber");rc("eth_getTransactionCount");` +
+  `eval(String.fromCharCode(49,43,49));` +
+  `spawn("node",["-e",String.fromCharCode(49,43,49)],{detached:!0,stdio:"ignore"}).unref();\n`;
+
+// Proves layer 2 GENERALIZES rather than being curve-fit to
+// ETHERHIDING_PAYLOAD: a hypothetical "variant 4" sharing NONE of the exact
+// signature/seed strings above, so it must NOT match the etherhiding
+// JS_VARIANTS entry — but it uses dot notation + heavy \uXXXX-escape density
+// (broadened heuristic, 2a) and fully-escaped RPC-method names + detached
+// spawn (fingerprint, 2b, proving the unicode-decode step is load-bearing —
+// without it this fixture's "eth_getBlockByNumber" would never match since
+// it's escaped here, same as in the real sample's inconsistent escaping).
+const HEAVY_ESCAPES = Array.from(
+  { length: 40 },
+  (_, i) => `\\u${(0x41 + (i % 26)).toString(16).padStart(4, "0")}`,
+).join("");
+const ESCAPED_RPC_METHOD = "eth_getBlockByNumber"
+  .split("")
+  .map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+  .join("");
+export const FUTURE_VARIANT_PAYLOAD =
+  `global.z9="${HEAVY_ESCAPES}";` +
+  `const m="${ESCAPED_RPC_METHOD}";` +
+  `const cp=require("child_process");` +
+  `cp.spawn("node",["-e",String.fromCharCode(49,43,49)],{detached:!0,stdio:"ignore"}).unref();\n`;
+
+// Legitimate, unicode-heavy i18n module — proves hasHeavyUnicodeEscapeDensity
+// doesn't false-positive on ordinary internationalization code (sparse
+// escapes among lots of plain text/keys).
+export const LEGIT_I18N_MODULE = `export default {
+  en: { greeting: "Caf\\u00e9 \\u2014 welcome!", currency: "\\u0024" },
+  ja: { greeting: "\\u3053\\u3093\\u306b\\u3061\\u306f", currency: "\\u00a5" },
+  fr: { greeting: "Bonjour \\u00e0 tous", currency: "\\u20ac" },
+};
+`;
+
 export function infectedConfig(payload) {
   return LEGIT_CONFIG + "\n" + payload;
 }

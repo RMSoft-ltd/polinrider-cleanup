@@ -37,6 +37,17 @@ export const JS_VARIANTS = [
     seeds: ["1111436", "3896884"],
     startRe: /global\s*\[\s*(['"])_V\1\s*\]\s*=/,
   },
+  {
+    id: "etherhiding",
+    label: "PolinRider payload (EtherHiding variant — dot-notation flag, blockchain-RPC C2 resolution)",
+    confidence: "high",
+    signature: 'global.r=require;typeof module==="object"&&(global.m=module);const http=require(',
+    decoder: null, // no `var _$_xxx=[...]` array — strings are inlined \uXXXX escapes instead
+    seeds: ["eth_getBlockByNumber", "eth_getTransactionCount"],
+    // Deliberately does NOT reference the rotating marker value (e.g. "A11--#") —
+    // only the flag name, so this keeps matching after the marker rotates again.
+    startRe: /global\s*\.\s*i\s*=\s*(['"])/,
+  },
 ];
 
 // Marks the end of legitimate code; the payload is appended after the LAST one.
@@ -45,9 +56,34 @@ export const EXPORT_MARKER_RE = /(?:export\s+default|module\.exports)/g;
 // Low-confidence heuristic for UNKNOWN future variants. When an obfuscated blob
 // is appended after the exports, we flag it for MANUAL REVIEW only — never an
 // automatic strip (avoids damaging legitimate-but-unusual code).
+//
+// Each category below accepts an alternative SHAPE (bracket vs dot notation,
+// decoder array vs inline-escape density, eval vs detached spawn) rather than
+// one fixed regex per category — the EtherHiding variant slipped through the
+// old shape-specific-AND version by using dot notation + no decoder array.
+// The overall test stays an AND-of-3-categories so a single broad regex can't
+// trip this on its own.
+export const GLOBAL_FLAG_RES = [
+  /global\s*\[\s*(['"]).{1,12}?\1\s*\]\s*=/, // global['!']=  (bracket notation)
+  /global\s*\.\s*[A-Za-z_$][\w$]{0,11}\s*=/, // global.i=     (dot notation)
+];
+
+export const OBF_ARRAY_RE = /\bvar\s+_\$?_?[A-Za-z0-9$_]+\s*=\s*\[/; // e.g. var _$_1e42=[...]
+export const UNICODE_ESCAPE_RE = /\\u[0-9a-fA-F]{4}/g;
+
+export const SPAWN_CALL_RE = /\bspawn\s*\(/;
+export const DETACHED_OPTION_RE = /\bdetached\s*:\s*(?:true|!0)\b/; // minifiers use !0 for true
+export const UNREF_CALL_RE = /\.unref\s*\(\s*\)/;
+
+export const ETH_RPC_METHOD_RES = [
+  /["']eth_getBlockByNumber["']/,
+  /["']eth_getTransactionCount["']/,
+  /["']eth_blockNumber["']/,
+];
+
 export const GENERIC_HEURISTIC = {
-  globalAssignRe: /global\s*\[\s*(['"]).{1,12}?\1\s*\]\s*=/,
-  obfArrayRe: /\bvar\s+_\$?_?[A-Za-z0-9$_]+\s*=\s*\[/, // e.g. var _$_1e42=[...]
+  globalAssignRes: GLOBAL_FLAG_RES,
+  obfArrayRe: OBF_ARRAY_RE,
   evalRe: /\beval\s*\(/,
 };
 
@@ -255,4 +291,62 @@ export function isFaFamilyName(basename) {
 /** True if `basename` is a sidecar file the malware drops with its font carrier (e.g. README.md). */
 export function isFontDropSidecar(basename) {
   return typeof basename === "string" && FONT_DROP_SIDECARS.includes(basename.toLowerCase());
+}
+
+/**
+ * Decode \uXXXX escapes in raw source TEXT — a plain string substitution
+ * (never eval/Function), the same transform a JS string literal undergoes at
+ * parse time. Real captured EtherHiding samples escape some string literals
+ * (RPC method names, "child_process") but not others in the SAME file —
+ * evidence that uniformly escaping any given substring is a trivial, cheap
+ * evasion. Running the technique-fingerprint checks below against the
+ * decoded text makes them immune to that, regardless of which strings a
+ * future variant chooses to escape.
+ */
+export function decodeUnicodeEscapes(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/**
+ * True if `text` is dominated by \uXXXX-escaped characters rather than plain
+ * source — the signature of a payload that inlines obfuscated strings
+ * instead of using a `var _$_xxx=[...]` decoder array. Requires BOTH a
+ * minimum absolute count (so a file with a couple of legitimate unicode
+ * escapes never trips this) AND a minimum density (escaped chars as a
+ * fraction of text length) — a legitimate i18n/locale file has scattered
+ * escapes among lots of plain text, so density stays low; an inlined
+ * obfuscated payload is mostly escapes. MUST be measured on RAW text, never
+ * on decodeUnicodeEscapes() output (decoding erases the very signal this
+ * measures).
+ */
+export function hasHeavyUnicodeEscapeDensity(text, { minCount = 20, minDensity = 0.12 } = {}) {
+  if (typeof text !== "string" || text.length === 0) return false;
+  const matches = text.match(UNICODE_ESCAPE_RE);
+  const count = matches ? matches.length : 0;
+  if (count < minCount) return false;
+  const escapedChars = count * 6; // "\uXXXX" is 6 source characters per escape
+  return escapedChars / text.length >= minDensity;
+}
+
+/**
+ * True if `text` spawns a child process with `detached` set AND calls
+ * `.unref()` on it — the "survive past this process" persistence idiom.
+ * Requires all three signals together since each alone is common in
+ * legitimate daemon/orchestration code. Callers should pass DECODED text.
+ */
+export function isDetachedSpawn(text) {
+  if (typeof text !== "string") return false;
+  return SPAWN_CALL_RE.test(text) && DETACHED_OPTION_RE.test(text) && UNREF_CALL_RE.test(text);
+}
+
+/**
+ * True if `text` contains an Ethereum JSON-RPC method-name literal associated
+ * with EtherHiding-style C2 resolution. Deliberately permissive alone — see
+ * the etherhiding-heuristic finding in scanner.js, which only fires combined
+ * with isDetachedSpawn. Callers should pass DECODED text.
+ */
+export function hasEthRpcMethodLiteral(text) {
+  if (typeof text !== "string") return false;
+  return ETH_RPC_METHOD_RES.some((re) => re.test(text));
 }

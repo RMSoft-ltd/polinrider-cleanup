@@ -35,12 +35,12 @@ For each repo in your org:
 1. **Clones** the default branch (shallow, `--depth=1`, git hooks disabled)
 2. **Scans in-process** — reads files as inert text/bytes and pattern-matches known PolinRider signatures. It **never executes** the files it scans (see [Runtime hardening](#runtime-hardening)). Detection is _content-confirmed_: a repo is marked infected only when a real signature matches.
 3. **Surgically remediates** infected repos — removing only what is confirmed malicious and preserving legitimate code, tasks, fonts, and configs:
-   - **Strips** the appended obfuscated payload (original + rotated variants) from any `.js/.ts/.mjs` file (config files, `App.js`, `vite.config.js`, …), keeping everything before the payload byte-for-byte
+   - **Strips** the appended obfuscated payload (original, rotated + EtherHiding variants) from any `.js/.ts/.mjs` file (config files, `App.js`, `vite.config.js`, …), keeping everything before the payload byte-for-byte
    - **Removes the entire `.vscode` directory** when any task/launch entry is malicious — `curl … | bash`, `runOn: folderOpen` auto-runs, C2 hosts, or running an interpreter against a font/asset (e.g. `node ./public/fonts/x.woff2`)
    - **Removes font carriers strategically.** A font is a _confirmed carrier_ only when it is unreferenced, fails structural font validation (no valid magic / table directory — real fonts, including commercial `.otf` files with embedded license URLs and binary blobs, are trusted), _and_ contains an appended code payload. When a carrier is found, the scanner removes the carrier plus the whole Font-Awesome-named disguise set (`fa-brands/solid/regular-…`) and its `README.md`, while **preserving clean, non-`fa-` fonts in the same directory** (only the leaf `fonts/` dir is removed if nothing clean remains). `fa-`-named fonts with **no** payload are flagged `suspicious` for manual review — never auto-removed.
    - **Deletes** `temp_auto_push.bat`, `temp_interactive_push.bat`, `config.bat`, `branch_structure.json`
    - **Fixes** `.gitignore` (removes all injected lines — `config.bat`, `temp_*.bat`, `branch_structure.json` — re-adds `.env*` patterns) and untracks committed `.env` files
-   - **Flags for manual review** (never auto-edits): impostor npm dependencies, fetch-and-exec lifecycle scripts, and unknown-but-obfuscated appended code
+   - **Flags for manual review** (never auto-edits): impostor npm dependencies, fetch-and-exec lifecycle scripts, unknown-but-obfuscated appended code (any global-flag + encoded-payload + eval/spawn shape), and EtherHiding-style blockchain C2-resolution + detached-persistence patterns
 4. **Opens a PR** on a new branch with a precise summary of every change — your branch protection rules apply, nothing merges automatically
 
 ---
@@ -182,8 +182,9 @@ jobs:
 - **`fix` + `commit` is push-event only.** On `pull_request` it's skipped (detached
   HEAD; fork PRs can't be pushed) — use `mode: pr` there. Commit-back uses the
   default `GITHUB_TOKEN`, whose pushes don't retrigger workflows (no loop).
-- Only **content-confirmed** infections fail by default; impostor deps and
-  fetch-and-exec scripts are flagged for manual review and (in `fix`/`pr`) still
+- Only **content-confirmed** infections fail by default; impostor deps,
+  fetch-and-exec scripts, and the generalized/EtherHiding-fingerprint heuristics
+  for unknown variants are flagged for manual review and (in `fix`/`pr`) still
   fail the check since they can't be auto-removed.
 
 ---
