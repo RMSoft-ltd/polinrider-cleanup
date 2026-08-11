@@ -636,13 +636,40 @@ var JS_VARIANTS = [
     decoder: "MDy",
     seeds: ["1111436", "3896884"],
     startRe: /global\s*\[\s*(['"])_V\1\s*\]\s*=/
+  },
+  {
+    id: "etherhiding",
+    label: "PolinRider payload (EtherHiding variant \u2014 dot-notation flag, blockchain-RPC C2 resolution)",
+    confidence: "high",
+    signature: 'global.r=require;typeof module==="object"&&(global.m=module);const http=require(',
+    decoder: null,
+    // no `var _$_xxx=[...]` array — strings are inlined \uXXXX escapes instead
+    seeds: ["eth_getBlockByNumber", "eth_getTransactionCount"],
+    // Deliberately does NOT reference the rotating marker value (e.g. "A11--#") —
+    // only the flag name, so this keeps matching after the marker rotates again.
+    startRe: /global\s*\.\s*i\s*=\s*(['"])/
   }
 ];
 var EXPORT_MARKER_RE = /(?:export\s+default|module\.exports)/g;
+var GLOBAL_FLAG_RES = [
+  /global\s*\[\s*(['"]).{1,12}?\1\s*\]\s*=/,
+  // global['!']=  (bracket notation)
+  /global\s*\.\s*[A-Za-z_$][\w$]{0,11}\s*=/
+  // global.i=     (dot notation)
+];
+var OBF_ARRAY_RE = /\bvar\s+_\$?_?[A-Za-z0-9$_]+\s*=\s*\[/;
+var UNICODE_ESCAPE_RE = /\\u[0-9a-fA-F]{4}/g;
+var SPAWN_CALL_RE = /\bspawn\s*\(/;
+var DETACHED_OPTION_RE = /\bdetached\s*:\s*(?:true|!0)\b/;
+var UNREF_CALL_RE = /\.unref\s*\(\s*\)/;
+var ETH_RPC_METHOD_RES = [
+  /["']eth_getBlockByNumber["']/,
+  /["']eth_getTransactionCount["']/,
+  /["']eth_blockNumber["']/
+];
 var GENERIC_HEURISTIC = {
-  globalAssignRe: /global\s*\[\s*(['"]).{1,12}?\1\s*\]\s*=/,
-  obfArrayRe: /\bvar\s+_\$?_?[A-Za-z0-9$_]+\s*=\s*\[/,
-  // e.g. var _$_1e42=[...]
+  globalAssignRes: GLOBAL_FLAG_RES,
+  obfArrayRe: OBF_ARRAY_RE,
   evalRe: /\beval\s*\(/
 };
 var JS_EXTENSIONS = [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"];
@@ -769,6 +796,26 @@ function isFaFamilyName(basename) {
 }
 function isFontDropSidecar(basename) {
   return typeof basename === "string" && FONT_DROP_SIDECARS.includes(basename.toLowerCase());
+}
+function decodeUnicodeEscapes(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+function hasHeavyUnicodeEscapeDensity(text, { minCount = 20, minDensity = 0.12 } = {}) {
+  if (typeof text !== "string" || text.length === 0) return false;
+  const matches = text.match(UNICODE_ESCAPE_RE);
+  const count2 = matches ? matches.length : 0;
+  if (count2 < minCount) return false;
+  const escapedChars = count2 * 6;
+  return escapedChars / text.length >= minDensity;
+}
+function isDetachedSpawn(text) {
+  if (typeof text !== "string") return false;
+  return SPAWN_CALL_RE.test(text) && DETACHED_OPTION_RE.test(text) && UNREF_CALL_RE.test(text);
+}
+function hasEthRpcMethodLiteral(text) {
+  if (typeof text !== "string") return false;
+  return ETH_RPC_METHOD_RES.some((re) => re.test(text));
 }
 
 // src/jsonc.js
@@ -1136,8 +1183,12 @@ async function detectJsPayloads(repoDir, findings, rel, isExcluded) {
     let m;
     while (m = re.exec(text)) lastExport = m.index;
     const tail = lastExport >= 0 ? text.slice(lastExport) : text;
+    const decodedTail = decodeUnicodeEscapes(tail);
     const h2 = GENERIC_HEURISTIC;
-    if (h2.globalAssignRe.test(tail) && h2.obfArrayRe.test(tail) && h2.evalRe.test(tail)) {
+    const hasGlobalFlag = h2.globalAssignRes.some((globalRe) => globalRe.test(decodedTail));
+    const hasObfEncoding = h2.obfArrayRe.test(tail) || hasHeavyUnicodeEscapeDensity(tail);
+    const hasExecPrimitive = h2.evalRe.test(decodedTail) || isDetachedSpawn(decodedTail);
+    if (hasGlobalFlag && hasObfEncoding && hasExecPrimitive) {
       findings.push({
         id: "js.payload.heuristic",
         category: "js",
@@ -1145,7 +1196,18 @@ async function detectJsPayloads(repoDir, findings, rel, isExcluded) {
         confidence: "low",
         action: "manual-review",
         contentConfirmed: false,
-        description: "Obfuscated code appended after the last export (global[...] assignment + obfuscated array + eval). Possible unknown PolinRider variant \u2014 review manually."
+        description: "Obfuscated code appended after the last export (global flag assignment + obfuscated/encoded payload + code-execution primitive). Possible unknown PolinRider variant \u2014 review manually."
+      });
+    }
+    if (hasEthRpcMethodLiteral(decodedTail) && isDetachedSpawn(decodedTail)) {
+      findings.push({
+        id: "js.payload.etherhiding-heuristic",
+        category: "js",
+        file: rel(file),
+        confidence: "high",
+        action: "manual-review",
+        contentConfirmed: false,
+        description: "Code appended after the last export queries Ethereum JSON-RPC methods (eth_getBlockByNumber/eth_getTransactionCount/eth_blockNumber) AND spawns a detached, unref'd child process \u2014 the EtherHiding C2-resolution + persistence pattern. Review manually; not auto-removed."
       });
     }
   }
